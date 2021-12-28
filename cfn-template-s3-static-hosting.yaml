@@ -1,0 +1,101 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+  BName:
+    Type: String
+
+Resources:
+ #----------S3 Bucket--------------------#
+ S3Bucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Ref BName
+      AccessControl: Private
+      WebsiteConfiguration:
+        IndexDocument: index.html
+
+#----------S3 Bucket Policy--------------------#
+ BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BName
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - 's3:GetObject'
+            Effect: Allow
+            Resource: !Join [
+              "",
+              [
+                "arn:aws:s3:::",
+                !Ref BName,
+                "/*"
+              ]
+            ]
+            Principal:
+              AWS: !Join [
+                "",
+                ["arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity ",
+                  !Ref CloudFrontOAI
+                ]
+              ]
+
+ #----------OAI --------------------#
+ CloudFrontOAI:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Ref BName
+
+ #----------Cloudfront Distribution --------------------#
+ CFDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+        DistributionConfig:
+          #----------------------------------#
+          CNAMEs:
+            - !Ref BName
+          DefaultCacheBehavior:
+            TargetOriginId: myS3originId
+            ForwardedValues:
+              QueryString: 'true'
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+            CachedMethods:
+              - GET
+              - HEAD
+          #---------- S3 origin details --------------------#
+          Origins:
+            - DomainName: !GetAtt S3Bucket.RegionalDomainName
+              # A Unique Id in the Distribution. Type: String
+              Id: myS3originId
+              S3OriginConfig:
+                OriginAccessIdentity: !Join ["",
+                  [
+                    "origin-access-identity/cloudfront/",
+                    !Ref CloudFrontOAI
+                  ]
+                ]
+          DefaultRootObject: index.html
+          #--------------------------------------------------#
+          Enabled: 'true'
+          HttpVersion: http2
+          IPV6Enabled: 'false'
+          # ViewerCertificate: {}
+          # Logging: {}
+          PriceClass: PriceClass_100
+          # WebACLId: String
+
+Outputs:
+  BucketName:
+    Value: !Ref BName
+    Description: Name of the Bucket
+  CloudFrontOAI:
+    Value: !Ref CloudFrontOAI
+    Description: Id of Origin Access Identity
+  CloudfrontDistributionId:
+    Value: !Ref CFDistribution
+    Description: Id of the CloudFront Distribution
