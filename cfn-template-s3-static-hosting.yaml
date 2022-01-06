@@ -1,38 +1,36 @@
 AWSTemplateFormatVersion: 2010-09-09
 
 Parameters:
-  BName:
+  DomainName:
     Type: String
+  LambdaEdgeFunArn:
+    Type: String
+  S3OriginId:
+    Type: String
+    Description:  Enter a unique string that represents S3Origin's Id
 
 Resources:
- #----------S3 Bucket--------------------#
- S3Bucket:
+  #----------S3 Bucket--------------------#
+  S3Bucket:
     Type: "AWS::S3::Bucket"
     Properties:
-      BucketName: !Ref BName
+      BucketName: !Ref DomainName
       AccessControl: Private
       WebsiteConfiguration:
         IndexDocument: index.html
-
-#----------S3 Bucket Policy--------------------#
- BucketPolicy:
+  #----------S3 Bucket Policy--------------------#
+  BucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
-      Bucket: !Ref BName
+      # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-s3-bucket.html#aws-resource-s3-bucket-return-values
+      Bucket: !Ref S3Bucket
       PolicyDocument:
         Version: 2012-10-17
         Statement:
           - Action:
               - 's3:GetObject'
             Effect: Allow
-            Resource: !Join [
-              "",
-              [
-                "arn:aws:s3:::",
-                !Ref BName,
-                "/*"
-              ]
-            ]
+            Resource: !Join [ "", [ !GetAtt S3Bucket.Arn, "/*"  ] ]
             Principal:
               AWS: !Join [
                 "",
@@ -40,62 +38,123 @@ Resources:
                   !Ref CloudFrontOAI
                 ]
               ]
-
- #----------OAI --------------------#
- CloudFrontOAI:
+  #---------- SSL Certificate ----------
+  SSLCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref "HostedZone"
+          # ValidationDomain: !Ref DomainName  #needed only for EMAIL validation
+      SubjectAlternativeNames:
+        - !Join [ "", ["*.", !Ref DomainName] ]
+      ValidationMethod: "DNS"
+  #---------- HostedZone ----------
+  HostedZone:
+      Type: AWS::Route53::HostedZone
+      Properties:
+        # hosted zone needs the domain name without any sub-domain(like www)
+        Name: !Ref DomainName
+  #---------- RecordSets Group ----------
+  RecordSetGroup:
+      Type: "AWS::Route53::RecordSetGroup"
+      Properties:
+        HostedZoneId: !Ref HostedZone
+        RecordSets:
+          - Name: !Ref DomainName
+            Type: 'MX'
+            TTL: 3600
+            ResourceRecords:
+              - '5 gmr-smtp-in.l.google.com.'
+              - '10 alt1.gmr-smtp-in.l.google.com.'
+              - '20 alt2.gmr-smtp-in.l.google.com.'
+              - '30 alt3.gmr-smtp-in.l.google.com.'
+              - '40 alt4.gmr-smtp-in.l.google.com.'
+          - Name: !Join [".", ["www", !Ref DomainName]]
+            Type: "A"
+            AliasTarget:
+              # Z2FDTNDATAQYW2 is always the hosted zone ID when you create
+              # an alias record that routes traffic to a CloudFront distribution.
+              HostedZoneId: Z2FDTNDATAQYW2
+              DNSName: !GetAtt CFDistribution.DomainName
+          - Name: !Ref DomainName
+            Type: "A"
+            AliasTarget:
+              # Z2FDTNDATAQYW2 is always the hosted zone ID when you create
+              # an alias record that routes traffic to a CloudFront distribution.
+              HostedZoneId: Z2FDTNDATAQYW2
+              DNSName: !GetAtt CFDistribution.DomainName
+  #----------OAI --------------------#
+  CloudFrontOAI:
     Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
     Properties:
       CloudFrontOriginAccessIdentityConfig:
-        Comment: !Ref BName
-
- #----------Cloudfront Distribution --------------------#
- CFDistribution:
+        Comment: !Ref DomainName
+  #----------Cloudfront Distribution --------------------#
+  CFDistribution:
     Type: AWS::CloudFront::Distribution
     Properties:
         DistributionConfig:
-          #----------------------------------#
+          # Note: CNAMEs aren't getting added at the moment via Cloudformation. Add them via Console #
+          # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-cloudfront-distribution-distributionconfig.html#cfn-cloudfront-distribution-distributionconfig-cnames
           CNAMEs:
-            - !Ref BName
+            - !Ref DomainName #Alternate domain names must be covered by a valid SSL/TLS certificate
+            - !Join [ ".", ["www", !Ref DomainName] ]
+          #---------- S3 origin details --------------------#
+          Origins:
+            - DomainName: !GetAtt S3Bucket.DomainName
+              Id: !Ref S3OriginId # A Unique Id in the Distribution. Type: String
+              S3OriginConfig:
+                OriginAccessIdentity: !Join [
+                                        "",[ "origin-access-identity/cloudfront/", !Ref CloudFrontOAI ]
+                                      ]
+          #---------------------------------------------------#
+          DefaultRootObject: index.html
+          CacheBehaviors:
+            - PathPattern: tools/checkmyip
+              AllowedMethods: ["GET", "HEAD"]
+              DefaultTTL: 900
+              MaxTTL: 900
+              MinTTL: 900
+              ForwardedValues:
+                QueryString: true
+              TargetOriginId: !Ref S3OriginId
+              ViewerProtocolPolicy: redirect-to-https
+              Compress: true
+              LambdaFunctionAssociations:
+                - EventType: viewer-request
+                  IncludeBody: true
+                  LambdaFunctionARN: !Ref LambdaEdgeFunArn
           DefaultCacheBehavior:
-            TargetOriginId: myS3originId
+            TargetOriginId: !Ref S3OriginId
             ForwardedValues:
               QueryString: 'true'
             ViewerProtocolPolicy: redirect-to-https
-            AllowedMethods:
-              - GET
-              - HEAD
-            CachedMethods:
-              - GET
-              - HEAD
-          #---------- S3 origin details --------------------#
-          Origins:
-            - DomainName: !GetAtt S3Bucket.RegionalDomainName
-              # A Unique Id in the Distribution. Type: String
-              Id: myS3originId
-              S3OriginConfig:
-                OriginAccessIdentity: !Join ["",
-                  [
-                    "origin-access-identity/cloudfront/",
-                    !Ref CloudFrontOAI
-                  ]
-                ]
-          DefaultRootObject: index.html
+            AllowedMethods: [ "GET", "HEAD" ]
+            CachedMethods: [ "GET", "HEAD" ]
+            Compress: true
+            DefaultTTL: 900
+            MaxTTL: 900
+            MinTTL: 900
           #--------------------------------------------------#
-          Enabled: 'true'
+          Enabled: true
           HttpVersion: http2
-          IPV6Enabled: 'false'
-          # ViewerCertificate: {}
+          IPV6Enabled: false
+          ViewerCertificate:
+              AcmCertificateArn: !Ref SSLCertificate
+              SslSupportMethod: sni-only
           # Logging: {}
           PriceClass: PriceClass_100
           # WebACLId: String
 
 Outputs:
-  BucketName:
-    Value: !Ref BName
-    Description: Name of the Bucket
-  CloudFrontOAI:
-    Value: !Ref CloudFrontOAI
-    Description: Id of Origin Access Identity
+  SSLCertificate:
+    Value: !Ref SSLCertificate
+    Description: SSLCertificate
   CloudfrontDistributionId:
     Value: !Ref CFDistribution
     Description: Id of the CloudFront Distribution
+  HostedZone:
+    Value:  !Ref HostedZone
+    Description: HostedZone
